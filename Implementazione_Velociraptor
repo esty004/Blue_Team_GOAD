@@ -1,0 +1,82 @@
+# Tutorial per installare Velociraptor
+
+## 1. Download e installazione iniziale
+
+Scarica il file di installazione di Velociraptor dal seguente link:
+```
+https://github.com/Velocidex/velociraptor/releases/download/v0.75/velociraptor-v0.75.6-windows-amd64.msi
+```
+
+Esegui il file .msi facendo doppio clic. L'installer creerà automaticamente una cartella, solitamente in:
+```
+C:\Program Files\Velociraptor
+```
+
+## 2. Generazione dei file di configurazione
+
+Apri il terminale (Prompt dei comandi o PowerShell) e naviga nella cartella di Velociraptor:
+
+```cmd
+cd "C:\Program Files\Velociraptor"
+```
+
+Avvia la generazione guidata dei file di configurazione:
+
+```cmd
+velociraptor.exe config generate -i
+```
+
+Durante la configurazione guidata, seleziona le seguenti opzioni:
+- **Self SSL**
+- **Windows**
+- **Indirizzo IP del server** (utilizza l'indirizzo IP effettivo al posto di localhost)
+
+Le altre opzioni possono essere lasciate con i valori predefiniti.
+
+## 3. Avvio del server
+
+Per avviare il server Velociraptor, esegui:
+
+```cmd
+velociraptor.exe --config server.config.yaml frontend -v
+```
+
+## 4. Accesso all'interfaccia web
+
+Apri il browser e accedi a:
+```
+https://localhost:8889/
+```
+
+## 5. Configurazione del firewall
+
+Su tutte le macchine che devono comunicare con il server, esegui il seguente comando PowerShell per aprire la porta necessaria:
+
+```powershell
+New-NetFirewallRule -DisplayName "Velociraptor Server" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+```
+
+## 6. Installazione del client
+
+Per installare il client sulle altre macchine:
+
+1. Scarica il binario di Velociraptor
+2. Ripeti i passaggi fino al punto 3
+3. Copia il file `velociraptor.config.yaml` nella cartella di installazione
+4. Avvia il client con:
+
+```cmd
+velociraptor.exe --config velociraptor.config.yaml client -v
+```
+
+## 7. Verifica e riavvio del servizio
+
+Su tutte le macchine:
+
+1. Apri Task Manager (Gestione attività)
+2. Individua il servizio Velociraptor
+3. Riavvia il servizio
+
+---
+
+**Nota**: Assicurati di avere i privilegi di amministratore per eseguire tutti i comandi e le installazioni.
