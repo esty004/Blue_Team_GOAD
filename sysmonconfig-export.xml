@@ -1,0 +1,47 @@
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+
+  <EventFiltering>
+
+    <!-- 1 - Process Creation -->
+    <ProcessCreate onmatch="include">
+      <CommandLine condition="is not">""</CommandLine>
+    </ProcessCreate>
+
+    <!-- 3 - Network Connection -->
+    <NetworkConnect onmatch="include">
+      <!-- Tutto incluso, filtrerai lato SIEM -->
+    </NetworkConnect>
+
+    <!-- 7 - Image Loaded (DLL Sideloading) -->
+    <ImageLoad onmatch="include">
+      <ImageLoaded condition="end with">.dll</ImageLoaded>
+    </ImageLoad>
+
+    <!-- 8 - CreateRemoteThread (Process Injection) -->
+    <CreateRemoteThread onmatch="include" />
+
+    <!-- 10 - Process Access (LSASS dumping & simili) -->
+    <ProcessAccess onmatch="include">
+      <TargetImage condition="end with">lsass.exe</TargetImage>
+    </ProcessAccess>
+
+    <!-- 11 - File Create (payload / persistenza) -->
+    <FileCreate onmatch="include">
+      <TargetFilename condition="contains">\Temp\</TargetFilename>
+      <TargetFilename condition="contains">\AppData\</TargetFilename>
+      <TargetFilename condition="contains">\Startup\</TargetFilename>
+    </FileCreate>
+
+    <!-- 13 - Registry Event (persistenza) -->
+    <RegistryEvent onmatch="include">
+      <TargetObject condition="contains">\Run</TargetObject>
+      <TargetObject condition="contains">\RunOnce</TargetObject>
+      <TargetObject condition="contains">\Services</TargetObject>
+    </RegistryEvent>
+
+    <!-- 17/18 - Named Pipes -->
+    <PipeEvent onmatch="include" />
+
+  </EventFiltering>
+</Sysmon>
