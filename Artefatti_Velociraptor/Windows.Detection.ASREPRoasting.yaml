@@ -1,0 +1,285 @@
+name: Windows.Detection.ASREPRoasting
+author: "Security Team"
+description: |
+  Rileva tentativi di attacco ASREPRoasting in ambienti Active Directory.
+  
+  L'ASREPRoasting sfrutta account AD con la pre-autenticazione Kerberos disabilitata
+  (flag DONT_REQ_PREAUTH). Un attaccante può richiedere un AS-REP per questi account
+  senza conoscere la password, ricevendo un blob cifrato craccabile offline.
+  
+  Questo artifact esegue tre analisi:
+  
+  1. **Account vulnerabili**: Trova utenti AD con DoesNotRequirePreAuth = True
+  2. **Event ID 4768**: Cerca richieste AS-REP senza pre-autenticazione (PreAuthType=0)
+  3. **Correlazione IP**: Raggruppa richieste sospette per IP sorgente (brute sweep)
+  
+  Prerequisiti per il rilevamento:
+  - Auditing Kerberos attivo sul Domain Controller (Event 4768 Success+Failure)
+  - Eseguire sull'host che funge da Domain Controller
+  - Privilegi sufficienti per query LDAP/AD
+
+type: CLIENT
+
+required_permissions:
+  - EXECVE
+
+parameters:
+  - name: SecurityEvtxPath
+    description: Percorso del log Security.evtx
+    default: "C:/Windows/System32/winevt/Logs/Security.evtx"
+
+  - name: LookbackDays
+    description: Quanti giorni indietro analizzare negli event log
+    type: int
+    default: 7
+
+  - name: SuspiciousThreshold
+    description: Numero minimo di richieste dallo stesso IP per considerarlo sospetto
+    type: int
+    default: 5
+
+  - name: CheckVulnerableAccounts
+    description: Cerca account AD con pre-autenticazione disabilitata (richiede modulo ActiveDirectory o RSAT)
+    type: bool
+    default: true
+
+sources:
+  # -----------------------------------------------------------------------
+  # FONTE 1 – Account AD vulnerabili (DoesNotRequirePreAuth = True)
+  # -----------------------------------------------------------------------
+  - name: VulnerableAccounts
+    description: |
+      Enumera gli account Active Directory con la pre-autenticazione Kerberos
+      disabilitata. Questi sono i target naturali di un attacco ASREPRoasting.
+    query: |
+      -- execve restituisce una riga per ogni riga di stdout del processo.
+      -- ConvertTo-Json -Compress -AsArray scrive il JSON su una riga sola,
+      -- ma PowerShell puo aggiungere righe vuote o di debug intorno.
+      -- Il filtro seleziona solo la riga che inizia con "[" (array JSON).
+      LET ENCODED_CMD = "CgB0AHIAeQAgAHsACgAgACAAIAAgAEkAbQBwAG8AcgB0AC0ATQBvAGQAdQBsAGUAIABBAGMAdABpAHYAZQBEAGkAcgBlAGMAdABvAHIAeQAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwB0AG8AcAAKACAAIAAgACAAWwBTAHkAcwB0AGUAbQAuAEMAbwBuAHMAbwBsAGUAXQA6ADoARQByAHIAbwByAC4AVwByAGkAdABlAEwAaQBuAGUAKAAnAEEAUwBSAEUAUABfAEQARQBCAFUARwA6ACAAbQBvAGQAdQBsAGUAIABsAG8AYQBkAGUAZAAsACAAcQB1AGUAcgB5AGkAbgBnACAAQQBEAC4ALgAuACcAKQAKACAAIAAgACAAJAB1ACAAPQAgAEAAKABHAGUAdAAtAEEARABVAHMAZQByACAALQBGAGkAbAB0AGUAcgAgAHsARABvAGUAcwBOAG8AdABSAGUAcQB1AGkAcgBlAFAAcgBlAEEAdQB0AGgAIAAtAGUAcQAgACQAdAByAHUAZQB9ACAAYAAKACAAIAAgACAAIAAgACAAIAAtAFAAcgBvAHAAZQByAHQAaQBlAHMAIABEAG8AZQBzAE4AbwB0AFIAZQBxAHUAaQByAGUAUAByAGUAQQB1AHQAaAAsAFAAYQBzAHMAdwBvAHIAZABMAGEAcwB0AFMAZQB0ACwATABhAHMAdABMAG8AZwBvAG4ARABhAHQAZQAsAEUAbgBhAGIAbABlAGQALABEAGkAcwB0AGkAbgBnAHUAaQBzAGgAZQBkAE4AYQBtAGUALABEAGUAcwBjAHIAaQBwAHQAaQBvAG4AIAB8AAoAIAAgACAAIAAgACAAIAAgAFMAZQBsAGUAYwB0AC0ATwBiAGoAZQBjAHQAIABTAGEAbQBBAGMAYwBvAHUAbgB0AE4AYQBtAGUALABFAG4AYQBiAGwAZQBkACwAUABhAHMAcwB3AG8AcgBkAEwAYQBzAHQAUwBlAHQALABMAGEAcwB0AEwAbwBnAG8AbgBEAGEAdABlACwARABpAHMAdABpAG4AZwB1AGkAcwBoAGUAZABOAGEAbQBlACwARABlAHMAYwByAGkAcAB0AGkAbwBuACkACgAgACAAIAAgAFsAUwB5AHMAdABlAG0ALgBDAG8AbgBzAG8AbABlAF0AOgA6AEUAcgByAG8AcgAuAFcAcgBpAHQAZQBMAGkAbgBlACgAJwBBAFMAUgBFAFAAXwBEAEUAQgBVAEcAOgAgAGYAbwB1AG4AZAAgACcAIAArACAAJAB1AC4AQwBvAHUAbgB0ACAAKwAgACcAIAB1AHMAZQByAHMAJwApAAoAIAAgACAAIABpAGYAIAAoACQAdQAuAEMAbwB1AG4AdAAgAC0AZQBxACAAMAApACAAewAKACAAIAAgACAAIAAgACAAIABXAHIAaQB0AGUALQBPAHUAdABwAHUAdAAgACcAWwBdACcACgAgACAAIAAgAH0AIABlAGwAcwBlACAAewAKACAAIAAgACAAIAAgACAAIABXAHIAaQB0AGUALQBPAHUAdABwAHUAdAAgACgAJAB1ACAAfAAgAEMAbwBuAHYAZQByAHQAVABvAC0ASgBzAG8AbgAgAC0AQwBvAG0AcAByAGUAcwBzACAALQBBAHMAQQByAHIAYQB5ACkACgAgACAAIAAgAH0ACgB9ACAAYwBhAHQAYwBoACAAewAKACAAIAAgACAAWwBTAHkAcwB0AGUAbQAuAEMAbwBuAHMAbwBsAGUAXQA6ADoARQByAHIAbwByAC4AVwByAGkAdABlAEwAaQBuAGUAKAAnAEEAUwBSAEUAUABfAEUAUgBSAE8AUgA6ACAAJwAgACsAIAAkAF8ALgBFAHgAYwBlAHAAdABpAG8AbgAuAE0AZQBzAHMAYQBnAGUAKQAKACAAIAAgACAAVwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAnAFsAXQAnAAoAfQAKAA=="
+
+      LET ad_check = if(
+        condition=CheckVulnerableAccounts,
+        then={
+          SELECT * FROM execve(
+            argv=["powershell.exe", "-NonInteractive", "-NoProfile",
+                  "-EncodedCommand", ENCODED_CMD],
+            length=10000000
+          )
+        },
+        else={ SELECT "[]" AS Stdout FROM scope() }
+      )
+
+      -- Seleziona solo la riga col JSON array:
+      -- un risultato reale e' piu' lungo di 2 caratteri e diverso da "[]"
+      LET raw_output = SELECT Stdout
+      FROM ad_check
+      WHERE Stdout AND Stdout != "" AND Stdout != "[]"
+
+      LET parsed = SELECT * FROM foreach(
+        row=raw_output,
+        query={
+          SELECT * FROM parse_json_array(data=Stdout)
+        }
+      ) WHERE SamAccountName
+
+      SELECT
+        SamAccountName      AS Account,
+        Enabled             AS AccountEnabled,
+        PasswordLastSet     AS PasswordLastSet,
+        LastLogonDate       AS LastLogon,
+        Description         AS Description,
+        DistinguishedName   AS DistinguishedName,
+        "DONT_REQ_PREAUTH"  AS VulnerableFlag,
+        "HIGH"              AS RiskLevel
+      FROM parsed
+
+  # -----------------------------------------------------------------------
+  # FONTE 2 – Event ID 4768 senza pre-autenticazione
+  # -----------------------------------------------------------------------
+  - name: ASREPEvents
+    description: |
+      Analizza il Security Event Log alla ricerca di Event ID 4768
+      (Kerberos Authentication Service Request) con PreAuthType = 0,
+      che indica una richiesta AS-REP senza pre-autenticazione.
+
+      Indicatori chiave:
+        - PreAuthType = 0  → pre-autenticazione non richiesta
+        - TicketEncryptionType = 0x17 (23) → RC4-HMAC, preferito dagli attaccanti
+          perche più veloce da craccare offline con Hashcat/JtR
+
+    query: |
+      LET cutoff = timestamp(epoch=now() - LookbackDays * 86400)
+
+      SELECT
+        System.TimeCreated.SystemTime                      AS EventTime,
+        System.Computer                                    AS DomainController,
+        EventData.TargetUserName                           AS TargetAccount,
+        EventData.TargetDomainName                         AS Domain,
+        EventData.IpAddress                                AS SourceIP,
+        EventData.IpPort                                   AS SourcePort,
+        EventData.Status                                   AS Status,
+        EventData.PreAuthType                              AS PreAuthType,
+        EventData.TicketEncryptionType                     AS EncryptionType,
+        EventData.TicketOptions                            AS TicketOptions,
+        "⚠ PRE-AUTH DISABILITATA"                         AS PreAuthStatus,
+        if(
+          condition=EventData.TicketEncryptionType = "0x17"
+            OR EventData.TicketEncryptionType = "23",
+          then="⚠ RC4-HMAC (craccabile)",
+          else=EventData.TicketEncryptionType
+        )                                                  AS EncryptionWarning
+      FROM parse_evtx(filename=SecurityEvtxPath)
+      WHERE System.EventID.Value = 4768
+        AND System.TimeCreated.SystemTime > cutoff
+        AND EventData.PreAuthType = "0"
+      ORDER BY EventTime DESC
+
+  # -----------------------------------------------------------------------
+  # FONTE 3 – Correlazione per IP sorgente (sweep detection)
+  # -----------------------------------------------------------------------
+  - name: SuspiciousSourceIPs
+    description: |
+      Aggrega le richieste AS-REP senza pre-autenticazione per IP sorgente.
+      Un numero elevato di richieste dallo stesso IP indica un'enumerazione
+      automatizzata (tipica di Rubeus, Impacket GetNPUsers.py, Kerbrute).
+
+
+    query: |
+      LET cutoff = timestamp(epoch=now() - LookbackDays * 86400)
+
+      LET all_asrep = SELECT
+        EventData.IpAddress             AS SourceIP,
+        EventData.TargetUserName        AS TargetAccount,
+        System.TimeCreated.SystemTime   AS EventTime,
+        System.Computer                 AS DomainController
+      FROM parse_evtx(filename=SecurityEvtxPath)
+      WHERE System.EventID.Value = 4768
+        AND System.TimeCreated.SystemTime > cutoff
+        AND EventData.PreAuthType = "0"
+
+      LET grouped = SELECT
+        SourceIP,
+        count()                                   AS TotalRequests,
+        enumerate(items=TargetAccount)            AS TargetAccounts,
+        min(item=EventTime)                       AS FirstSeen,
+        max(item=EventTime)                       AS LastSeen,
+        DomainController
+      FROM all_asrep
+      GROUP BY SourceIP
+
+      SELECT
+        SourceIP,
+        TotalRequests,
+        TargetAccounts,
+        FirstSeen,
+        LastSeen,
+        DomainController,
+        if(
+          condition=TotalRequests >= SuspiciousThreshold,
+          then="🔴 CRITICO – Possibile sweep ASREPRoasting",
+          else=if(
+            condition=TotalRequests >= 2,
+            then="🟡 SOSPETTO – Richieste multiple",
+            else="🟢 Basso"
+          )
+        )                                          AS ThreatLevel
+      FROM grouped
+      ORDER BY TotalRequests DESC
+
+  # -----------------------------------------------------------------------
+  # FONTE 4 – Verifica stato audit policy
+  # -----------------------------------------------------------------------
+  - name: AuditPolicyCheck
+    description: |
+      Verifica che l'audit Kerberos Authentication Service sia abilitato.
+      Senza questa policy, gli eventi 4768 non vengono generati e il rilevamento
+      è impossibile.
+    query: |
+      LET audit_result = SELECT *
+      FROM execve(
+        argv=[
+          "auditpol.exe",
+          "/get",
+          "/subcategory:{0cce9242-69ae-11d9-bed3-505054503030}"
+        ],
+        length=100000
+      )
+
+      SELECT
+        Stdout                                            AS AuditOutput,
+        if(
+          condition=Stdout =~ "Success and Failure",
+          then="✅ CORRETTO – Success and Failure abilitato",
+          else=if(
+            condition=Stdout =~ "Success",
+            then="⚠ PARZIALE – Solo Success abilitato (aggiungere Failure)",
+            else="❌ DISABILITATO – Abilitare con: auditpol /set /subcategory:'Kerberos Authentication Service' /success:enable /failure:enable"
+          )
+        )                                                 AS AuditStatus,
+        "auditpol /set /subcategory:\"Kerberos Authentication Service\" /success:enable /failure:enable" AS FixCommand
+      FROM audit_result
+      WHERE Stdout
+
+column_types:
+  - name: EventTime
+    type: timestamp
+  - name: FirstSeen
+    type: timestamp
+  - name: LastSeen
+    type: timestamp
+  - name: PasswordLastSet
+    type: timestamp
+  - name: LastLogon
+    type: timestamp
+
+reports:
+  - type: CLIENT
+    template: |
+      ## 🔐 Report Rilevamento ASREPRoasting
+
+      ASREPRoasting è un attacco Kerberos che sfrutta account AD con
+      pre-autenticazione disabilitata per estrarre hash craccabili offline.
+
+      ---
+
+      ### 📋 Stato Audit Policy
+      {{ Query "AuditPolicyCheck" | Table }}
+
+      ---
+
+      ### ⚠️ Account AD Vulnerabili
+      Account con `DoesNotRequirePreAuth = True` — target diretti dell'attacco:
+      {{ Query "VulnerableAccounts" | Table }}
+
+      ---
+
+      ### 🎯 Richieste AS-REP Senza Pre-Autenticazione (Event 4768)
+      Richieste Kerberos con `PreAuthType = 0` negli ultimi **{{ Scope "LookbackDays" }} giorni**:
+      {{ Query "ASREPEvents" | Table }}
+
+      ---
+
+      ### 🌐 IP Sorgente Sospetti (Correlazione)
+      IP che hanno effettuato il maggior numero di richieste senza pre-autenticazione:
+      {{ Query "SuspiciousSourceIPs" | Table }}
+
+      ---
+
+      ### 🛡️ Remediation Consigliata
+
+      **Immediata:**
+      - Abilitare la pre-autenticazione Kerberos su tutti gli account vulnerabili
+      - Bloccare/investigare gli IP classificati come CRITICI
+      - Resettare le password degli account enumerati
+
+      **Powershell – Fix account vulnerabili:**
+      ```powershell
+      Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true} |
+        Set-ADAccountControl -DoesNotRequirePreAuth $false
+      ```
+
+      **Monitoraggio continuativo:**
+      - Pianificare questo artifact come hunt settimanale
+      - Configurare alert su Event 4768 con PreAuthType=0
+      - Monitorare richieste RC4-HMAC (EncryptionType 0x17)
