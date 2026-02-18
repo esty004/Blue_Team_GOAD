@@ -1,47 +1,77 @@
 <Sysmon schemaversion="4.90">
-  <HashAlgorithms>SHA256</HashAlgorithms>
-
+  <HashAlgorithms>SHA256,IMPHASH</HashAlgorithms>
   <EventFiltering>
 
     <!-- 1 - Process Creation -->
     <ProcessCreate onmatch="include">
-      <CommandLine condition="is not">""</CommandLine>
+      <CommandLine condition="is not"></CommandLine>
     </ProcessCreate>
 
-    <!-- 3 - Network Connection -->
+    <!-- 2 - File Creation Time Change (Timestomping) -->
+    <FileCreateTime onmatch="include" />
+
+    <!-- 3 - Network Connection: escludi noise, includi sospetti -->
     <NetworkConnect onmatch="include">
-      <!-- Tutto incluso, filtrerai lato SIEM -->
+      <DestinationPort condition="is">4444</DestinationPort>
+      <DestinationPort condition="is">1337</DestinationPort>
+      <DestinationPort condition="is">8080</DestinationPort>
+      <Image condition="contains">powershell</Image>
+      <Image condition="contains">cmd.exe</Image>
+      <Image condition="contains">wscript</Image>
+      <Image condition="contains">mshta</Image>
     </NetworkConnect>
 
-    <!-- 7 - Image Loaded (DLL Sideloading) -->
+    <!-- 7 - Image Load: solo path sospetti o non firmati -->
     <ImageLoad onmatch="include">
-      <ImageLoaded condition="end with">.dll</ImageLoaded>
+      <ImageLoaded condition="contains">\Temp\</ImageLoaded>
+      <ImageLoaded condition="contains">\AppData\</ImageLoaded>
+      <ImageLoaded condition="contains">\Downloads\</ImageLoaded>
+      <Signed condition="is">false</Signed>
     </ImageLoad>
 
-    <!-- 8 - CreateRemoteThread (Process Injection) -->
+    <!-- 8 - CreateRemoteThread -->
     <CreateRemoteThread onmatch="include" />
 
-    <!-- 10 - Process Access (LSASS dumping & simili) -->
+    <!-- 10 - LSASS Access -->
     <ProcessAccess onmatch="include">
       <TargetImage condition="end with">lsass.exe</TargetImage>
     </ProcessAccess>
 
-    <!-- 11 - File Create (payload / persistenza) -->
+    <!-- 11 - File Create -->
     <FileCreate onmatch="include">
       <TargetFilename condition="contains">\Temp\</TargetFilename>
       <TargetFilename condition="contains">\AppData\</TargetFilename>
       <TargetFilename condition="contains">\Startup\</TargetFilename>
+      <TargetFilename condition="contains">\Downloads\</TargetFilename>
+      <TargetFilename condition="contains">\Desktop\</TargetFilename>
+      <TargetFilename condition="end with">.exe</TargetFilename>
+      <TargetFilename condition="end with">.ps1</TargetFilename>
+      <TargetFilename condition="end with">.bat</TargetFilename>
     </FileCreate>
 
-    <!-- 13 - Registry Event (persistenza) -->
+    <!-- 13 - Registry (persistenza) -->
     <RegistryEvent onmatch="include">
       <TargetObject condition="contains">\Run</TargetObject>
       <TargetObject condition="contains">\RunOnce</TargetObject>
       <TargetObject condition="contains">\Services</TargetObject>
     </RegistryEvent>
 
+    <!-- 15 - Alternate Data Streams -->
+    <FileCreateStreamHash onmatch="include">
+      <TargetFilename condition="contains">\Downloads\</TargetFilename>
+      <TargetFilename condition="contains">\Temp\</TargetFilename>
+    </FileCreateStreamHash>
+
     <!-- 17/18 - Named Pipes -->
     <PipeEvent onmatch="include" />
+
+    <!-- 22 - DNS Query (C2 detection) -->
+    <DnsQuery onmatch="include">
+      <QueryName condition="is not">localhost</QueryName>
+    </DnsQuery>
+
+    <!-- 25 - Process Tampering (hollowing/herpaderping) -->
+    <ProcessTampering onmatch="include" />
 
   </EventFiltering>
 </Sysmon>
