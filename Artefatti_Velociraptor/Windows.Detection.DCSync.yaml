@@ -1,0 +1,101 @@
+name: Windows.Detection.DCSync
+description: |
+  Rileva possibili attacchi DCSync analizzando l'Event ID 4662 nel Security log.
+  Un DCSync avviene quando un account non-DC richiede la replica delle credenziali
+  AD usando il protocollo MS-DRSR (DRSGetNCChanges).
+
+  Prerequisiti:
+    - "Audit Directory Service Access" abilitato su AD via GPO
+    - Eseguire su Domain Controller
+
+  MITRE ATT&CK: T1003.006 - OS Credential Dumping: DCSync
+
+author: Custom Detection
+type: CLIENT
+
+parameters:
+  - name: SecurityLog
+    default: "C:/Windows/System32/winevt/Logs/Security.evtx"
+    description: Percorso del Security Event Log
+
+  - name: StartTime
+    type: timestamp
+    description: Analizza eventi da questa data (lascia vuoto per tutti)
+
+  - name: ExcludeMachineAccounts
+    type: bool
+    default: true
+    description: Esclude account macchina (terminano con $)
+
+sources:
+  - name: DCSync Events
+    description: Event ID 4662 con GUID di replica AD
+    query: |
+      -- GUID delle operazioni di replica AD (DCSync)
+      LET replication_guids = "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2|1131f6ab-9c07-11d1-f79f-00c04fc2dcd2|89e95b76-444d-4c62-991a-0facbeda640c"
+
+      LET raw_events = SELECT *
+      FROM parse_evtx(filename=SecurityLog)
+      WHERE System.EventID.Value = 4662
+
+      LET filtered = SELECT
+          timestamp(epoch=System.TimeCreated.SystemTime) AS EventTime,
+          System.Computer AS SourceComputer,
+          EventData.SubjectUserName AS User,
+          EventData.SubjectDomainName AS Domain,
+          EventData.SubjectLogonId AS LogonID,
+          EventData.ObjectType AS ObjectType,
+          EventData.Properties AS Properties,
+          -- Indica quale diritto di replica è stato usato
+          if(condition= EventData.Properties =~ "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2",
+             then="DS-Replication-Get-Changes", else=
+          if(condition= EventData.Properties =~ "1131f6ab-9c07-11d1-f79f-00c04fc2dcd2",
+             then="DS-Replication-Get-Changes-All", else=
+          if(condition= EventData.Properties =~ "89e95b76-444d-4c62-991a-0facbeda640c",
+             then="DS-Replication-Get-Changes-In-Filtered-Set",
+             else="Unknown"))) AS ReplicationRight,
+          "HIGH" AS Severity
+      FROM raw_events
+      WHERE
+          -- Filtra per GUID DCSync
+          EventData.Properties =~ replication_guids
+          -- Esclude account macchina se richiesto
+          AND if(condition= ExcludeMachineAccounts,
+                 then= NOT EventData.SubjectUserName =~ "\\$$",
+                 else= true)
+          -- Filtro temporale opzionale
+          AND if(condition= StartTime,
+                 then= timestamp(epoch=System.TimeCreated.SystemTime) > StartTime,
+                 else= true)
+
+      SELECT * FROM filtered
+      ORDER BY EventTime DESC
+
+  - name: Summary
+    description: Riepilogo degli utenti sospetti rilevati
+    query: |
+      LET replication_guids = "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2|1131f6ab-9c07-11d1-f79f-00c04fc2dcd2|89e95b76-444d-4c62-991a-0facbeda640c"
+
+      SELECT
+          EventData.SubjectUserName AS User,
+          EventData.SubjectDomainName AS Domain,
+          count() AS TotalEvents,
+          min(item=timestamp(epoch=System.TimeCreated.SystemTime)) AS FirstSeen,
+          max(item=timestamp(epoch=System.TimeCreated.SystemTime)) AS LastSeen
+      FROM parse_evtx(filename=SecurityLog)
+      WHERE System.EventID.Value = 4662
+        AND EventData.Properties =~ replication_guids
+        AND if(condition= ExcludeMachineAccounts,
+               then= NOT EventData.SubjectUserName =~ "\\$$",
+               else= true)
+      GROUP BY User, Domain
+
+column_types:
+  - name: EventTime
+    type: timestamp
+  - name: FirstSeen
+    type: timestamp
+  - name: LastSeen
+    type: timestamp
+  - name: Severity
+    type: string
