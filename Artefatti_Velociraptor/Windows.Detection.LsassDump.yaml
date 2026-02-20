@@ -1,0 +1,146 @@
+name: Windows.Detection.LsassDump
+description: |
+  Rileva tentativi di dump delle credenziali da LSASS (Local Security Authority Subsystem Service).
+  Copre tecniche comuni: Task Manager, ProcDump, Mimikatz, comsvcs.dll MiniDump,
+  Nanodump, PPLdump, SilentProcessExit, handle sospetti su lsass.exe.
+author: Blue Team
+type: CLIENT
+
+sources:
+
+  - name: LsassHandleAccess
+    description: |
+      Individua processi che richiedono handle su lsass.exe con diritti di lettura memoria.
+      Richiede audit abilitato: auditpol /set /subcategory:"Kernel Object" /success:enable
+    query: |
+      SELECT System.TimeCreated.SystemTime AS EventTime,
+             System.EventID.Value AS EventID,
+             EventData.SubjectUserName AS User,
+             EventData.ProcessName AS SourceProcess,
+             EventData.ObjectName AS TargetObject,
+             EventData.AccessMask AS AccessMask
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx")
+      WHERE System.EventID.Value IN (4656, 4663)
+        AND EventData.ObjectName =~ "(?i)lsass"
+        AND EventData.AccessMask =~ "0x(10|1[0-9a-f]|[2-9a-f][0-9a-f]|1[0-9a-f]{2,})"
+      ORDER BY EventTime DESC
+
+  - name: SuspiciousLsassAccess_Live
+    description: |
+      Cerca processi sospetti attivi in memoria al momento della hunt.
+      La colonna Triage indica se il risultato e un falso positivo atteso o un vero alert.
+      lsass.exe stesso appare sempre come EXPECTED - conferma che la query funziona.
+    query: |
+      SELECT Pid,
+             Name,
+             CommandLine,
+             Username,
+             CreateTime,
+             hash(path=Exe) AS SHA256,
+             if(condition= Name =~ "(?i)^lsass\\.exe$" AND Username = "NT AUTHORITY\\SYSTEM",
+                then= "EXPECTED - lsass.exe legittimo",
+                else= "ALERT - processo sospetto") AS Triage
+      FROM pslist()
+      WHERE Name =~ "(?i)(mimikatz|procdump|nanodump|ppldump|outflank|lsassy|pypykatz)"
+         OR CommandLine =~ "(?i)(sekurlsa|logonpasswords|wdigest|credential)"
+         OR CommandLine =~ "(?i)(comsvcs|dumpert|handlekatz)"
+         OR Name =~ "(?i)^lsass\\.exe$"
+
+  - name: SuspiciousLsassAccess_EventLog
+    description: |
+      Cerca nei log processi sospetti gia terminati che hanno acceduto a LSASS.
+      Cattura tool come rundll32+comsvcs che terminano in pochi secondi.
+      Richiede: auditpol /set /subcategory:"Process Creation" /success:enable
+      Richiede CommandLine logging:
+      reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" /v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f
+    query: |
+      SELECT System.TimeCreated.SystemTime AS EventTime,
+             EventData.SubjectUserName AS User,
+             EventData.NewProcessName AS Process,
+             EventData.CommandLine AS CommandLine,
+             EventData.ParentProcessName AS ParentProcess
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx")
+      WHERE System.EventID.Value = 4688
+        AND (
+          EventData.NewProcessName =~ "(?i)(mimikatz|procdump|nanodump|ppldump|pypykatz)"
+          OR EventData.CommandLine =~ "(?i)(sekurlsa|logonpasswords|wdigest)"
+          OR EventData.CommandLine =~ "(?i)(comsvcs.*MiniDump|dumpert|handlekatz)"
+          OR (EventData.NewProcessName =~ "(?i)rundll32" AND
+              EventData.CommandLine =~ "(?i)(comsvcs|lsass|.dmp)")
+        )
+      ORDER BY EventTime DESC
+
+  - name: ComsvcsMiniDump
+    description: |
+      Rileva l'uso di comsvcs.dll MiniDump via rundll32, tecnica LOLBAS molto comune.
+      Esempio: rundll32.exe C:\Windows\System32\comsvcs.dll MiniDump <PID> lsass.dmp full
+    query: |
+      SELECT System.TimeCreated.SystemTime AS EventTime,
+             EventData.SubjectUserName AS User,
+             EventData.NewProcessName AS Process,
+             EventData.CommandLine AS CommandLine,
+             EventData.ParentProcessName AS ParentProcess
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx")
+      WHERE System.EventID.Value = 4688
+        AND (
+          EventData.CommandLine =~ "(?i)comsvcs"
+          OR EventData.CommandLine =~ "(?i)MiniDump"
+          OR (EventData.NewProcessName =~ "(?i)rundll32" AND
+              EventData.CommandLine =~ "(?i)(lsass|.dmp|dump)")
+        )
+      ORDER BY EventTime DESC
+
+  - name: DumpFilesOnDisk
+    description: |
+      Cerca file .dmp e .mdmp in percorsi sospetti tra 10 MB e 500 MB.
+    query: |
+      SELECT OSPath,
+             Size,
+             Mtime,
+             Atime,
+             hash(path=OSPath) AS SHA256
+      FROM glob(globs=[
+        "C:/Users/**/*.dmp",
+        "C:/Users/**/*.mdmp",
+        "C:/Temp/**/*.dmp",
+        "C:/Temp/**/*.mdmp",
+        "C:/Windows/Temp/**/*.dmp",
+        "C:/Windows/Temp/**/*.mdmp",
+        "C:/*.dmp",
+        "C:/*.mdmp",
+        "C:/PerfLogs/**/*.dmp"
+      ])
+      WHERE Size > 10000000 AND Size < 500000000
+      ORDER BY Mtime DESC
+
+  - name: TaskManagerDump
+    description: |
+      Rileva dump LSASS tramite Task Manager o Windows Error Reporting (WER).
+    query: |
+      SELECT OSPath,
+             Size,
+             Mtime,
+             hash(path=OSPath) AS SHA256
+      FROM glob(globs=[
+        "C:/Windows/Temp/lsass*.dmp",
+        "C:/Windows/Temp/lsass*.DMP",
+        "C:/Users/*/AppData/Local/Temp/lsass*.dmp",
+        "C:/ProgramData/Microsoft/Windows/WER/**/*.dmp"
+      ])
+
+  - name: SysmonLsassAccess
+    description: |
+      Se Sysmon e installato, Event ID 10 (ProcessAccess) rileva qualsiasi
+      processo che apre un handle su lsass.exe con diritti di lettura memoria.
+    query: |
+      SELECT System.TimeCreated.SystemTime AS EventTime,
+             EventData.SourceImage AS AttackingProcess,
+             EventData.TargetImage AS TargetProcess,
+             EventData.GrantedAccess AS AccessRights,
+             EventData.CallTrace AS CallTrace,
+             EventData.SourceUser AS User
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx")
+      WHERE System.EventID.Value = 10
+        AND EventData.TargetImage =~ "(?i)lsass\.exe"
+        AND EventData.GrantedAccess =~ "0x(1[0-9a-f]{2,}|[2-9a-f][0-9a-f]{2,})"
+      ORDER BY EventTime DESC
