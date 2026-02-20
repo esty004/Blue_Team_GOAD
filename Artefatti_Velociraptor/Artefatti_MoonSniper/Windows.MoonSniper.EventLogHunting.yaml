@@ -1,0 +1,97 @@
+name: Windows.MoonSniper.EventLogHunting
+description: |
+  Analisi degli Event Log Windows per tracce della catena di attacco
+  MoonSniper: Sysmon events, Security events, PowerShell logs.
+author: Lab ITS
+type: CLIENT
+
+parameters:
+  - name: LookbackHours
+    default: 24
+    description: Quante ore indietro cercare
+
+sources:
+  - name: Sysmon_ProcessCreate
+    description: Sysmon Event ID 1 - Process creation IOC
+    query: |
+      SELECT System.TimeCreated.SystemTime AS Time,
+             System.EventID.Value AS EventID,
+             EventData.Image AS Image,
+             EventData.CommandLine AS CommandLine,
+             EventData.ParentImage AS ParentImage,
+             EventData.User AS User,
+             EventData.Hashes AS Hashes,
+             EventData.ProcessId AS PID
+      FROM parse_evtx(
+        filename="C:/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx"
+      )
+      WHERE System.EventID.Value = 1
+        AND System.TimeCreated.SystemTime > now() - LookbackHours * 3600000000000
+        AND (
+          EventData.Image =~ "(?i)MoonSniper" OR
+          EventData.Image =~ "(?i)\\\\main\\.exe$" OR
+          EventData.Image =~ "(?i)update\\.exe" OR
+          (EventData.Image =~ "(?i)RuntimeBroker" AND
+           NOT EventData.ParentImage =~ "(?i)(svchost|services|wininit)")
+        )
+
+  - name: Sysmon_NetworkConnect
+    description: Sysmon Event ID 3 - Network connections a C2
+    query: |
+      SELECT System.TimeCreated.SystemTime AS Time,
+             EventData.Image AS Image,
+             EventData.DestinationIp AS DestIP,
+             EventData.DestinationPort AS DestPort,
+             EventData.SourceIp AS SrcIP,
+             EventData.Protocol AS Protocol,
+             EventData.ProcessId AS PID
+      FROM parse_evtx(
+        filename="C:/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx"
+      )
+      WHERE System.EventID.Value = 3
+        AND System.TimeCreated.SystemTime > now() - LookbackHours * 3600000000000
+        AND (
+          EventData.DestinationIp = "192.168.56.60" OR
+          EventData.DestinationIp = "10.0.2.15" OR
+          EventData.Image =~ "(?i)RuntimeBroker"
+        )
+
+  - name: Sysmon_ProcessAccess
+    description: Sysmon Event ID 10 - Process access (injection prerequisite)
+    query: |
+      SELECT System.TimeCreated.SystemTime AS Time,
+             EventData.SourceImage AS SourceImage,
+             EventData.TargetImage AS TargetImage,
+             EventData.GrantedAccess AS GrantedAccess,
+             EventData.SourceProcessId AS SourcePID,
+             EventData.TargetProcessId AS TargetPID
+      FROM parse_evtx(
+        filename="C:/Windows/System32/winevt/Logs/Microsoft-Windows-Sysmon%4Operational.evtx"
+      )
+      WHERE System.EventID.Value = 10
+        AND System.TimeCreated.SystemTime > now() - LookbackHours * 3600000000000
+        AND (
+          EventData.TargetImage =~ "(?i)RuntimeBroker" OR
+          EventData.SourceImage =~ "(?i)MoonSniper" OR
+          EventData.SourceImage =~ "(?i)\\\\main\\.exe$"
+        )
+
+  - name: Security_ProcessCreate_4688
+    description: Security Event 4688 - Process creation (audit abilitato)
+    query: |
+      SELECT System.TimeCreated.SystemTime AS Time,
+             EventData.NewProcessName AS NewProcess,
+             EventData.ParentProcessName AS Parent,
+             EventData.CommandLine AS CommandLine,
+             EventData.SubjectUserName AS User
+      FROM parse_evtx(
+        filename="C:/Windows/System32/winevt/Logs/Security.evtx"
+      )
+      WHERE System.EventID.Value = 4688
+        AND System.TimeCreated.SystemTime > now() - LookbackHours * 3600000000000
+        AND (
+          EventData.NewProcessName =~ "(?i)MoonSniper" OR
+          EventData.NewProcessName =~ "(?i)\\\\main\\.exe$" OR
+          (EventData.NewProcessName =~ "(?i)RuntimeBroker" AND
+           NOT EventData.ParentProcessName =~ "(?i)(svchost|services|wininit)")
+        )
