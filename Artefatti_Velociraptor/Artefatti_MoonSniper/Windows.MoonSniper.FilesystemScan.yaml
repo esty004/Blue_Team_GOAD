@@ -1,0 +1,75 @@
+name: Windows.MoonSniper.FilesystemScan
+description: |
+  Scansione filesystem per hash noti di MoonSniper.exe e update.exe.
+  Cerca anche per nome file e pattern YARA.
+author: Lab ITS
+type: CLIENT
+
+parameters:
+  - name: ScanPath
+    default: C:/
+    description: Path di partenza per la scansione
+
+sources:
+  - name: HashScan
+    description: Cerca file con hash SHA256 noti
+    query: |
+      -- Hash noti MoonSniper
+      LET known_hashes = (
+        "342b51b9c0ea333b6a493b95bd4cd3ce76565ceec9f7bb199ac0f263b7b66ae4",  -- MoonSniper.exe
+        "d1be53881a8f1d52bea7a7b5b12633543779529577f5498828dbeecdaabf31dc",  -- update.exe (encrypted)
+        "52c6ce8a0271127c9026da0f9f92af9e0b0b130cb37e14b2b5051c82c4bb149c"   -- Havoc demon (decrypted)
+      )
+
+      SELECT FullPath, Size,
+             hash(path=FullPath, hashselect="SHA256") AS SHA256,
+             hash(path=FullPath, hashselect="MD5") AS MD5,
+             Mtime, Atime, Ctime
+      FROM glob(globs=ScanPath + "/**/*.exe")
+      WHERE SHA256.SHA256 IN known_hashes
+
+  - name: NameScan
+    description: Cerca file per nome sospetto
+    query: |
+      SELECT FullPath, Size, Mtime,
+             hash(path=FullPath, hashselect="SHA256") AS SHA256
+      FROM glob(globs=[
+        ScanPath + "/**/MoonSniper.exe",
+        ScanPath + "/**/main.exe",
+        ScanPath + "/**/update.exe",
+        ScanPath + "/**/*.pdb"
+      ])
+      WHERE FullPath != null
+
+  - name: YaraScan_Disk
+    description: Scansione YARA su file .exe per rilevare loader e payload
+    query: |
+      SELECT FullPath, RuleName, HitOffset, Mtime
+      FROM yara(
+        files=ScanPath + "/**/*.exe",
+        rules='''
+          rule MoonSniper_Loader_Disk {
+            meta:
+              description = "MoonSniper loader on disk"
+            strings:
+              $pdb   = "MoonSniper.pdb" ascii
+              $str1  = "Starting with love" wide
+              $str2  = "RuntimeBroker.exe" wide
+              $api1  = "QueueUserAPC" ascii
+              $api2  = "DebugActiveProcessStop" ascii
+              $url   = "192.168.56.60" wide
+            condition:
+              uint16(0) == 0x5A4D and
+              (($pdb) or ($str1 and $str2 and $api1 and $api2) or ($url and $api1))
+          }
+
+          rule Havoc_Encrypted_Payload {
+            meta:
+              description = "Havoc demon RC4-encrypted payload"
+            condition:
+              filesize == 103935 and
+              uint32(0) == 0xBDAE7640
+          }
+        ''',
+        number=1000
+      )
