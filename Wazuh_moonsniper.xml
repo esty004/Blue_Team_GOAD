@@ -1,0 +1,199 @@
+<!-- ============================================================
+  WAZUH RULES — MoonSniper / Havoc C2 Detection
+  File:    /var/ossec/etc/rules/wazuh_moonsniper_rules.xml
+  Versione: 2.0 (fixed group names)
+  Data:    2026-02-20
+  
+  DIPENDENZE:
+    - Sysmon installato e configurato (sysmonconfig-merged.xml)
+    - Wazuh agent Windows con log collection su:
+        Microsoft-Windows-Sysmon/Operational
+    - Regole built-in: /var/ossec/ruleset/rules/0595-win-sysmon_rules.xml
+  
+  NOTA: I nomi dei gruppi Sysmon nel file 0595 sono:
+    Event ID 1-9:   sysmon_event1 ... sysmon_event9
+    Event ID 10+:   sysmon_event_10, sysmon_event_11, ... sysmon_event_25
+  
+  INSTALLAZIONE:
+    1. cp wazuh_moonsniper_rules.xml /var/ossec/etc/rules/
+    2. systemctl restart wazuh-manager
+    3. Verificare: /var/ossec/bin/wazuh-logtest
+  ============================================================ -->
+
+<group name="moonsniper,havoc_c2,malware,">
+
+  <!-- ===========================================================
+       GRUPPO 1 — LOADER DETECTION (MoonSniper.exe / main.exe)
+       Sorgente: Sysmon Event ID 1 (Process Create)
+       if_group: sysmon_event1
+       =========================================================== -->
+
+  <rule id="100100" level="15">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)(?:MoonSniper|\\main)\.exe$</field>
+    <description>CRITICAL: Esecuzione loader MoonSniper rilevata - $(win.eventdata.image) (PID: $(win.eventdata.processId))</description>
+    <mitre>
+      <id>T1106</id>
+      <id>T1055.004</id>
+    </mitre>
+    <group>moonsniper_loader,high_severity,</group>
+  </rule>
+
+  <rule id="100101" level="14">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)RuntimeBroker\.exe$</field>
+    <field name="win.eventdata.parentImage" negate="yes" type="pcre2">(?i)(svchost|services|wininit)\.exe$</field>
+    <description>ALERT: RuntimeBroker.exe creato da parent sospetto: $(win.eventdata.parentImage)</description>
+    <mitre>
+      <id>T1036.005</id>
+      <id>T1055</id>
+    </mitre>
+    <group>process_injection,masquerading,</group>
+  </rule>
+
+  <rule id="100102" level="12">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)update\.exe$</field>
+    <field name="win.eventdata.currentDirectory" type="pcre2">(?i)(temp|appdata|downloads|desktop)</field>
+    <description>WARN: Esecuzione di update.exe da directory sospetta: $(win.eventdata.currentDirectory)</description>
+    <group>suspicious_execution,staging_payload,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 2 — NETWORK C2 DETECTION
+       Sorgente: Sysmon Event ID 3 (Network Connect)
+       if_group: sysmon_event3
+       =========================================================== -->
+
+  <rule id="100110" level="15">
+    <if_group>sysmon_event3</if_group>
+    <field name="win.eventdata.destinationIp">192.168.56.60</field>
+    <description>CRITICAL: Connessione verso C2 Havoc primario 192.168.56.60 da $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1071.001</id>
+      <id>T1573.001</id>
+    </mitre>
+    <group>c2_communication,havoc_c2,</group>
+  </rule>
+
+  <rule id="100111" level="15">
+    <if_group>sysmon_event3</if_group>
+    <field name="win.eventdata.destinationIp">10.0.2.15</field>
+    <description>CRITICAL: Connessione verso C2 Havoc secondario 10.0.2.15 da $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1071.001</id>
+    </mitre>
+    <group>c2_communication,havoc_c2,</group>
+  </rule>
+
+  <rule id="100112" level="14">
+    <if_group>sysmon_event3</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)RuntimeBroker\.exe$</field>
+    <field name="win.eventdata.initiated">true</field>
+    <description>ALERT: RuntimeBroker.exe connessione outbound verso $(win.eventdata.destinationIp):$(win.eventdata.destinationPort) — indicativo di injection</description>
+    <mitre>
+      <id>T1055.004</id>
+      <id>T1071.001</id>
+    </mitre>
+    <group>anomalous_network,process_injection,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 3 — PROCESS INJECTION CHAIN
+       Sorgente: Sysmon Event ID 10 (Process Access)
+       if_group: sysmon_event_10
+       =========================================================== -->
+
+  <rule id="100120" level="14">
+    <if_group>sysmon_event_10</if_group>
+    <field name="win.eventdata.targetImage" type="pcre2">(?i)RuntimeBroker\.exe$</field>
+    <field name="win.eventdata.grantedAccess" type="pcre2">(0x1fffff|0x001f0fff|0x0028)</field>
+    <description>ALERT: Accesso elevato ($(win.eventdata.grantedAccess)) a RuntimeBroker.exe da $(win.eventdata.sourceImage)</description>
+    <mitre>
+      <id>T1055.004</id>
+    </mitre>
+    <group>process_injection,memory_injection,</group>
+  </rule>
+
+  <rule id="100121" level="15">
+    <if_group>sysmon_event_10</if_group>
+    <field name="win.eventdata.sourceImage" type="pcre2">(?i)(?:MoonSniper|\\main)\.exe$</field>
+    <description>CRITICAL: MoonSniper accede al processo $(win.eventdata.targetImage) con diritti $(win.eventdata.grantedAccess)</description>
+    <group>moonsniper_loader,process_injection,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 4 — REMOTE THREAD / APC INJECTION
+       Sorgente: Sysmon Event ID 8 (Create Remote Thread)
+       if_group: sysmon_event8
+       =========================================================== -->
+
+  <rule id="100130" level="15">
+    <if_group>sysmon_event8</if_group>
+    <field name="win.eventdata.targetImage" type="pcre2">(?i)RuntimeBroker\.exe$</field>
+    <description>CRITICAL: Thread remoto in RuntimeBroker.exe da $(win.eventdata.sourceImage) — injection confermata</description>
+    <mitre>
+      <id>T1055.004</id>
+    </mitre>
+    <group>confirmed_injection,critical_alert,</group>
+  </rule>
+
+  <rule id="100131" level="15">
+    <if_group>sysmon_event8</if_group>
+    <field name="win.eventdata.sourceImage" type="pcre2">(?i)(?:MoonSniper|\\main)\.exe$</field>
+    <description>CRITICAL: MoonSniper ha iniettato un thread in $(win.eventdata.targetImage)</description>
+    <group>moonsniper_loader,confirmed_injection,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 5 — FILE SYSTEM IOC
+       Sorgente: Sysmon Event ID 11 (File Create)
+       if_group: sysmon_event_11
+       =========================================================== -->
+
+  <rule id="100140" level="12">
+    <if_group>sysmon_event_11</if_group>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)update\.exe$</field>
+    <description>WARN: File update.exe scritto in $(win.eventdata.targetFilename) da $(win.eventdata.image)</description>
+    <group>staging_payload,file_ioc,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 6 — CORRELAZIONE
+       =========================================================== -->
+
+  <rule id="100150" level="15" timeframe="120" frequency="2">
+    <if_matched_group>c2_communication</if_matched_group>
+    <same_field>win.system.computer</same_field>
+    <description>CRITICAL: Comunicazioni C2 multiple sullo stesso host — compromissione attiva MoonSniper/Havoc</description>
+    <mitre>
+      <id>T1105</id>
+      <id>T1071.001</id>
+    </mitre>
+    <group>attack_chain,critical_incident,moonsniper_full_chain,</group>
+  </rule>
+
+  <rule id="100151" level="15" timeframe="120" frequency="2">
+    <if_matched_group>process_injection</if_matched_group>
+    <same_field>win.system.computer</same_field>
+    <description>CRITICAL: Injection multipla sullo stesso host — beacon Havoc attivo</description>
+    <group>attack_chain,havoc_beacon_active,critical_incident,</group>
+  </rule>
+
+  <!-- ===========================================================
+       GRUPPO 7 — PROCESS TAMPERING
+       Sorgente: Sysmon Event ID 25
+       if_group: sysmon_event_25
+       =========================================================== -->
+
+  <rule id="100160" level="15">
+    <if_group>sysmon_event_25</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)RuntimeBroker\.exe$</field>
+    <description>CRITICAL: Process tampering rilevato su RuntimeBroker.exe</description>
+    <mitre>
+      <id>T1055</id>
+    </mitre>
+    <group>process_tampering,critical_alert,</group>
+  </rule>
+
+</group>
