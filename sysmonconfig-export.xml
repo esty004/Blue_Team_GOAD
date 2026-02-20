@@ -1,77 +1,376 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+================================================================================
+  SYSMON CONFIGURATION — Lab ITS AD Security
+  Base:       sysmonconfig-export.xml (copertura generale)
+  Overlay:    sysmon_moonsniper.xml (detection MoonSniper / Havoc C2)
+  Versione:   2.0 (merged)
+  Data:       2026-02-20
+  Schema:     4.90
+
+  Installazione: sysmon64.exe -accepteula -i sysmonconfig-merged.xml
+  Aggiornamento: sysmon64.exe -c sysmonconfig-merged.xml
+
+  COPERTURA EVENTI:
+    Event ID 1  — Process Create          (generale + MoonSniper)
+    Event ID 2  — File Creation Time       (timestomping)
+    Event ID 3  — Network Connection       (generale + MoonSniper C2)
+    Event ID 7  — Image Loaded             (generale + WinINet anomalo)
+    Event ID 8  — CreateRemoteThread       (generale + injection RuntimeBroker)
+    Event ID 10 — ProcessAccess            (LSASS + RuntimeBroker injection)
+    Event ID 11 — FileCreate               (generale + payload staging)
+    Event ID 13 — Registry                 (persistenza Run/RunOnce/Services)
+    Event ID 15 — Alternate Data Streams
+    Event ID 17/18 — Named Pipes
+    Event ID 22 — DNS Query
+    Event ID 25 — Process Tampering        (generale + RuntimeBroker)
+================================================================================
+-->
 <Sysmon schemaversion="4.90">
-  <HashAlgorithms>SHA256,IMPHASH</HashAlgorithms>
+
+  <HashAlgorithms>md5,sha256,imphash</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+  <DnsLookup>false</DnsLookup>
+
   <EventFiltering>
 
-    <!-- 1 - Process Creation -->
-    <ProcessCreate onmatch="include">
-      <CommandLine condition="is not"></CommandLine>
-    </ProcessCreate>
+    <!-- ================================================================
+         EVENT ID 1 — PROCESS CREATE
+         Baseline: log di tutti i processi con CommandLine
+         MoonSniper: detection specifica loader + RuntimeBroker anomalo
+         ================================================================ -->
 
-    <!-- 2 - File Creation Time Change (Timestomping) -->
+    <!-- BASELINE — Tutti i processi con commandline (general visibility) -->
+    <RuleGroup name="ProcessCreate_Baseline" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <Rule name="AllProcesses_WithCmdLine" groupRelation="or">
+          <CommandLine condition="is not"></CommandLine>
+        </Rule>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- MOONSNIPER — Detection specifica -->
+    <RuleGroup name="ProcessCreate_MoonSniper" groupRelation="or">
+      <ProcessCreate onmatch="include">
+
+        <!-- MoonSniper loader per nome file (incluso alias main.exe) -->
+        <Rule name="MoonSniper_Filename" groupRelation="or">
+          <Image condition="end with">MoonSniper.exe</Image>
+          <Image condition="end with">main.exe</Image>
+          <OriginalFileName condition="is">MoonSniper.exe</OriginalFileName>
+        </Rule>
+
+        <!-- RuntimeBroker.exe spawned da parent non-system (injection target) -->
+        <Rule name="RuntimeBroker_Anomalous_Parent" groupRelation="and">
+          <Image condition="end with">RuntimeBroker.exe</Image>
+          <ParentImage condition="excludes">svchost.exe</ParentImage>
+          <ParentImage condition="excludes">services.exe</ParentImage>
+          <ParentImage condition="excludes">wininit.exe</ParentImage>
+        </Rule>
+
+        <!-- RuntimeBroker eseguito da path non standard -->
+        <Rule name="RuntimeBroker_Wrong_Path" groupRelation="and">
+          <OriginalFileName condition="is">RuntimeBroker.exe</OriginalFileName>
+          <Image condition="not begin with">C:\Windows\System32\</Image>
+        </Rule>
+
+        <!-- update.exe da cartelle utente/temp -->
+        <Rule name="Suspicious_UpdateExe" groupRelation="or">
+          <CommandLine condition="contains">update.exe</CommandLine>
+          <Image condition="end with">update.exe</Image>
+        </Rule>
+
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 2 — FILE CREATION TIME CHANGE (timestomping)
+         ================================================================ -->
     <FileCreateTime onmatch="include" />
 
-    <!-- 3 - Network Connection: escludi noise, includi sospetti -->
-    <NetworkConnect onmatch="include">
-      <DestinationPort condition="is">4444</DestinationPort>
-      <DestinationPort condition="is">1337</DestinationPort>
-      <DestinationPort condition="is">8080</DestinationPort>
-      <Image condition="contains">powershell</Image>
-      <Image condition="contains">cmd.exe</Image>
-      <Image condition="contains">wscript</Image>
-      <Image condition="contains">mshta</Image>
-    </NetworkConnect>
+    <!-- ================================================================
+         EVENT ID 3 — NETWORK CONNECTION
+         Baseline: porte sospette + LOLBins di rete
+         MoonSniper: IP C2 + RuntimeBroker con connessioni outbound
+         ================================================================ -->
 
-    <!-- 7 - Image Load: solo path sospetti o non firmati -->
-    <ImageLoad onmatch="include">
-      <ImageLoaded condition="contains">\Temp\</ImageLoaded>
-      <ImageLoaded condition="contains">\AppData\</ImageLoaded>
-      <ImageLoaded condition="contains">\Downloads\</ImageLoaded>
-      <Signed condition="is">false</Signed>
-    </ImageLoad>
+    <!-- BASELINE — Porte sospette e LOLBins -->
+    <RuleGroup name="NetworkConnect_Baseline" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Rule name="SuspiciousPorts" groupRelation="or">
+          <DestinationPort condition="is">4444</DestinationPort>
+          <DestinationPort condition="is">1337</DestinationPort>
+          <DestinationPort condition="is">8080</DestinationPort>
+        </Rule>
+        <Rule name="LOLBins_Network" groupRelation="or">
+          <Image condition="contains">powershell</Image>
+          <Image condition="contains">cmd.exe</Image>
+          <Image condition="contains">wscript</Image>
+          <Image condition="contains">mshta</Image>
+        </Rule>
+      </NetworkConnect>
+    </RuleGroup>
 
-    <!-- 8 - CreateRemoteThread -->
-    <CreateRemoteThread onmatch="include" />
+    <!-- MOONSNIPER — IP C2 e RuntimeBroker anomalo -->
+    <RuleGroup name="NetworkConnect_MoonSniper" groupRelation="or">
+      <NetworkConnect onmatch="include">
 
-    <!-- 10 - LSASS Access -->
-    <ProcessAccess onmatch="include">
-      <TargetImage condition="end with">lsass.exe</TargetImage>
-    </ProcessAccess>
+        <!-- IP C2 Havoc -->
+        <Rule name="C2_IP_Primary" groupRelation="or">
+          <DestinationIp condition="is">192.168.56.60</DestinationIp>
+          <DestinationIp condition="is">10.0.2.15</DestinationIp>
+        </Rule>
 
-    <!-- 11 - File Create -->
-    <FileCreate onmatch="include">
-      <TargetFilename condition="contains">\Temp\</TargetFilename>
-      <TargetFilename condition="contains">\AppData\</TargetFilename>
-      <TargetFilename condition="contains">\Startup\</TargetFilename>
-      <TargetFilename condition="contains">\Downloads\</TargetFilename>
-      <TargetFilename condition="contains">\Desktop\</TargetFilename>
-      <TargetFilename condition="end with">.exe</TargetFilename>
-      <TargetFilename condition="end with">.ps1</TargetFilename>
-      <TargetFilename condition="end with">.bat</TargetFilename>
-    </FileCreate>
+        <!-- RuntimeBroker che inizia connessioni = ANOMALO -->
+        <Rule name="RuntimeBroker_Network" groupRelation="and">
+          <Image condition="end with">RuntimeBroker.exe</Image>
+          <Initiated condition="is">true</Initiated>
+        </Rule>
 
-    <!-- 13 - Registry (persistenza) -->
-    <RegistryEvent onmatch="include">
-      <TargetObject condition="contains">\Run</TargetObject>
-      <TargetObject condition="contains">\RunOnce</TargetObject>
-      <TargetObject condition="contains">\Services</TargetObject>
-    </RegistryEvent>
+        <!-- Connessione HTTPS verso C2 staging server -->
+        <Rule name="Staging_URL_Pattern" groupRelation="and">
+          <DestinationPort condition="is">443</DestinationPort>
+          <DestinationIp condition="is">192.168.56.60</DestinationIp>
+        </Rule>
 
-    <!-- 15 - Alternate Data Streams -->
-    <FileCreateStreamHash onmatch="include">
-      <TargetFilename condition="contains">\Downloads\</TargetFilename>
-      <TargetFilename condition="contains">\Temp\</TargetFilename>
-    </FileCreateStreamHash>
+      </NetworkConnect>
+    </RuleGroup>
 
-    <!-- 17/18 - Named Pipes -->
+    <!-- ================================================================
+         EVENT ID 7 — IMAGE LOADED
+         Baseline: DLL da path sospetti + non firmate
+         MoonSniper: WinINet in processi non-browser / RuntimeBroker
+         ================================================================ -->
+
+    <!-- BASELINE — DLL sospette -->
+    <RuleGroup name="ImageLoad_Baseline" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <Rule name="DLL_Suspicious_Path" groupRelation="or">
+          <ImageLoaded condition="contains">\Temp\</ImageLoaded>
+          <ImageLoaded condition="contains">\AppData\</ImageLoaded>
+          <ImageLoaded condition="contains">\Downloads\</ImageLoaded>
+        </Rule>
+        <Rule name="Unsigned_DLL">
+          <Signed condition="is">false</Signed>
+        </Rule>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- MOONSNIPER — WinINet anomala -->
+    <RuleGroup name="ImageLoad_MoonSniper" groupRelation="or">
+      <ImageLoad onmatch="include">
+
+        <!-- WinINet in RuntimeBroker = injection con capability di rete -->
+        <Rule name="WinINet_In_RuntimeBroker" groupRelation="and">
+          <ImageLoaded condition="end with">wininet.dll</ImageLoaded>
+          <Image condition="end with">RuntimeBroker.exe</Image>
+        </Rule>
+
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 8 — CREATE REMOTE THREAD
+         Baseline: log di tutti i remote threads
+         MoonSniper: injection in/da RuntimeBroker e MoonSniper
+         ================================================================ -->
+
+    <!-- BASELINE — Tutti i remote threads -->
+    <RuleGroup name="RemoteThread_Baseline" groupRelation="or">
+      <CreateRemoteThread onmatch="include">
+        <Rule name="AllRemoteThreads">
+          <SourceImage condition="is not">-</SourceImage>
+        </Rule>
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- MOONSNIPER — Injection specifica -->
+    <RuleGroup name="RemoteThread_MoonSniper" groupRelation="or">
+      <CreateRemoteThread onmatch="include">
+
+        <!-- Thread iniettato IN RuntimeBroker -->
+        <Rule name="Injection_Into_RuntimeBroker">
+          <TargetImage condition="end with">RuntimeBroker.exe</TargetImage>
+        </Rule>
+
+        <!-- Thread da MoonSniper/main.exe -->
+        <Rule name="Injection_From_Suspicious" groupRelation="or">
+          <SourceImage condition="end with">MoonSniper.exe</SourceImage>
+          <SourceImage condition="end with">main.exe</SourceImage>
+        </Rule>
+
+        <!-- Shellcode: start address senza modulo mappato -->
+        <Rule name="Shellcode_StartAddress" groupRelation="and">
+          <TargetImage condition="end with">RuntimeBroker.exe</TargetImage>
+          <StartModule condition="is"></StartModule>
+        </Rule>
+
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 10 — PROCESS ACCESS
+         Baseline: accesso a LSASS (credential dumping)
+         MoonSniper: accesso a RuntimeBroker con diritti injection
+         ================================================================ -->
+
+    <!-- BASELINE — LSASS access (Mimikatz, credential dumping) -->
+    <RuleGroup name="ProcessAccess_Baseline" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <Rule name="LSASS_Access">
+          <TargetImage condition="end with">lsass.exe</TargetImage>
+        </Rule>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- MOONSNIPER — Injection in RuntimeBroker -->
+    <RuleGroup name="ProcessAccess_MoonSniper" groupRelation="or">
+      <ProcessAccess onmatch="include">
+
+        <!-- PROCESS_ALL_ACCESS (0x1fffff) su RuntimeBroker -->
+        <Rule name="WriteAccess_RuntimeBroker" groupRelation="and">
+          <TargetImage condition="end with">RuntimeBroker.exe</TargetImage>
+          <GrantedAccess condition="is">0x1fffff</GrantedAccess>
+        </Rule>
+
+        <!-- VM_WRITE + VM_OPERATION (0x0028) -->
+        <Rule name="VM_Write_RuntimeBroker" groupRelation="and">
+          <TargetImage condition="end with">RuntimeBroker.exe</TargetImage>
+          <GrantedAccess condition="is">0x0028</GrantedAccess>
+        </Rule>
+
+        <!-- DEBUG_PROCESS handle (0x001f0fff) -->
+        <Rule name="Debug_Handle_RuntimeBroker" groupRelation="and">
+          <TargetImage condition="end with">RuntimeBroker.exe</TargetImage>
+          <GrantedAccess condition="is">0x001f0fff</GrantedAccess>
+        </Rule>
+
+        <!-- Qualsiasi accesso da MoonSniper / main.exe -->
+        <Rule name="MoonSniper_Any_Access" groupRelation="or">
+          <SourceImage condition="end with">MoonSniper.exe</SourceImage>
+          <SourceImage condition="end with">main.exe</SourceImage>
+        </Rule>
+
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 11 — FILE CREATE
+         Baseline: .exe/.ps1/.bat in path sensibili
+         MoonSniper: update.exe + file scritti dal loader
+         ================================================================ -->
+
+    <!-- BASELINE — File sospetti in path sensibili -->
+    <RuleGroup name="FileCreate_Baseline" groupRelation="or">
+      <FileCreate onmatch="include">
+        <Rule name="Exe_Suspicious_Paths" groupRelation="or">
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+          <TargetFilename condition="contains">\AppData\</TargetFilename>
+          <TargetFilename condition="contains">\Startup\</TargetFilename>
+          <TargetFilename condition="contains">\Downloads\</TargetFilename>
+          <TargetFilename condition="contains">\Desktop\</TargetFilename>
+        </Rule>
+        <Rule name="Executable_Extensions" groupRelation="or">
+          <TargetFilename condition="end with">.exe</TargetFilename>
+          <TargetFilename condition="end with">.ps1</TargetFilename>
+          <TargetFilename condition="end with">.bat</TargetFilename>
+        </Rule>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- MOONSNIPER — Payload staging -->
+    <RuleGroup name="FileCreate_MoonSniper" groupRelation="or">
+      <FileCreate onmatch="include">
+
+        <!-- update.exe (payload RC4-encrypted) scritto su disco -->
+        <Rule name="UpdateExe_Written">
+          <TargetFilename condition="end with">update.exe</TargetFilename>
+        </Rule>
+
+        <!-- File scritti da MoonSniper / main.exe -->
+        <Rule name="MoonSniper_FileWrite" groupRelation="or">
+          <Image condition="end with">MoonSniper.exe</Image>
+          <Image condition="end with">main.exe</Image>
+        </Rule>
+
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 13 — REGISTRY EVENT (persistenza)
+         ================================================================ -->
+    <RuleGroup name="Registry_Persistence" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <Rule name="Run_Keys" groupRelation="or">
+          <TargetObject condition="contains">\Run</TargetObject>
+          <TargetObject condition="contains">\RunOnce</TargetObject>
+          <TargetObject condition="contains">\Services</TargetObject>
+        </Rule>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 15 — ALTERNATE DATA STREAMS
+         ================================================================ -->
+    <RuleGroup name="ADS_Detection" groupRelation="or">
+      <FileCreateStreamHash onmatch="include">
+        <Rule name="ADS_Suspicious_Paths" groupRelation="or">
+          <TargetFilename condition="contains">\Downloads\</TargetFilename>
+          <TargetFilename condition="contains">\Temp\</TargetFilename>
+        </Rule>
+      </FileCreateStreamHash>
+    </RuleGroup>
+
+    <!-- ================================================================
+         EVENT ID 17/18 — NAMED PIPES
+         ================================================================ -->
     <PipeEvent onmatch="include" />
 
-    <!-- 22 - DNS Query (C2 detection) -->
-    <DnsQuery onmatch="include">
-      <QueryName condition="is not">localhost</QueryName>
-    </DnsQuery>
+    <!-- ================================================================
+         EVENT ID 22 — DNS QUERY (C2 domain detection)
+         ================================================================ -->
+    <RuleGroup name="DNS_Monitoring" groupRelation="or">
+      <DnsQuery onmatch="include">
+        <Rule name="All_DNS_Except_Localhost">
+          <QueryName condition="is not">localhost</QueryName>
+        </Rule>
+      </DnsQuery>
+    </RuleGroup>
 
-    <!-- 25 - Process Tampering (hollowing/herpaderping) -->
+    <!-- ================================================================
+         EVENT ID 25 — PROCESS TAMPERING
+         Baseline: tutti gli eventi di tampering
+         MoonSniper: RuntimeBroker specifico
+         ================================================================ -->
+
+    <!-- BASELINE — Tutti i tampering -->
     <ProcessTampering onmatch="include" />
 
   </EventFiltering>
+
 </Sysmon>
+
+<!--
+================================================================================
+  NOTE DI INSTALLAZIONE:
+
+  1. Scaricare Sysmon: https://docs.microsoft.com/sysinternals/downloads/sysmon
+  2. Installare: sysmon64.exe -accepteula -i sysmonconfig-merged.xml
+  3. Verificare: sc query sysmon64
+  4. Log path: Applications and Services Logs > Microsoft > Windows > Sysmon > Operational
+  5. Event IDs da forwarding verso Wazuh: 1,2,3,7,8,10,11,13,15,17,18,22,25
+
+  REGOLE MOONSNIPER INTEGRATE:
+  - ProcessCreate: MoonSniper.exe / main.exe + RuntimeBroker anomalo
+  - NetworkConnect: IP C2 192.168.56.60, 10.0.2.15 + RuntimeBroker outbound
+  - CreateRemoteThread: injection in/da RuntimeBroker
+  - ProcessAccess: handle 0x1fffff/0x0028/0x001f0fff su RuntimeBroker
+  - ImageLoad: WinINet in RuntimeBroker
+  - FileCreate: update.exe staging
+
+  TEST DETECTION (in lab isolato):
+  - Eseguire MoonSniper.exe (o main.exe se rinominato) → attesi Event ID 1, 3, 10
+  - Verificare nel log Sysmon le regole sopra
+  - Controllare correlazione in Wazuh dashboard
+================================================================================
+-->
