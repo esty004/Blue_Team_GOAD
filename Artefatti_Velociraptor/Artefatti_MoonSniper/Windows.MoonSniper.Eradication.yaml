@@ -1,0 +1,203 @@
+name: Windows.MoonSniper.Eradication
+description: |
+  ## MoonSniper / Havoc C2 — Containment & Eradication
+
+  Artifact di risposta automatica. Lancia come Hunt su tutti i client.
+
+  1. Blocco IP C2 via Windows Firewall
+  2. Kill RuntimeBroker con connessioni C2 attive
+  3. Kill processi loader MoonSniper/main.exe/update.exe
+  4. Rimozione file malevoli per hash
+  5. Verifica completamento
+  6. Controllo persistenza (registry + scheduled tasks)
+
+type: CLIENT
+author: Blue Team ITS Lab
+required_permissions:
+  - EXECVE
+
+parameters:
+  - name: C2_IPs
+    default: "192.168.56.60,10.0.2.15"
+    description: "IP C2 da bloccare (separati da virgola)"
+
+  - name: MaliciousHashes
+    default: "342b51b9c0ea333b6a493b95bd4cd3ce76565ceec9f7bb199ac0f263b7b66ae4,abff4a4f031c95f0380d3a72d019b18ca7b6cee969ba8023e87f7efbcd1649a6"
+    description: "Hash SHA256 dei file da eliminare"
+
+  - name: ScanPaths
+    default: "C:/Users,C:/Windows/Temp,C:/ProgramData"
+    description: "Path da scansionare per file malevoli"
+
+sources:
+  - name: Phase1_Block_C2
+    description: "Blocco connessioni outbound verso C2"
+    query: |
+      LET c2_list = split(string=C2_IPs, sep=",")
+
+      SELECT * FROM foreach(
+        row=c2_list,
+        query={
+          SELECT
+            _value AS C2_IP,
+            timestamp(epoch=now()) AS Timestamp,
+            "Block_C2" AS Action,
+            Stdout, Stderr, ReturnCode
+          FROM execve(argv=[
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            "name=MoonSniper_Block_" + _value,
+            "dir=out", "action=block",
+            "remoteip=" + _value,
+            "enable=yes"
+          ])
+        }
+      )
+
+  - name: Phase2_Kill_Injected_RuntimeBroker
+    description: "Termina RuntimeBroker.exe con connessioni C2 attive"
+    query: |
+      LET c2_list = split(string=C2_IPs, sep=",")
+
+      LET c2_pids = SELECT str(str=Pid) AS PidStr, Pid,
+            RemoteAddr, RemotePort, Status
+        FROM netstat()
+        WHERE RemoteAddr IN c2_list
+          AND Status = "ESTABLISHED"
+
+      SELECT * FROM foreach(
+        row=c2_pids,
+        query={
+          SELECT
+            Pid,
+            RemoteAddr + ":" + str(str=RemotePort) AS C2_Endpoint,
+            timestamp(epoch=now()) AS Timestamp,
+            "Kill_C2_Process" AS Action,
+            Stdout, Stderr, ReturnCode
+          FROM execve(argv=["taskkill", "/F", "/PID", PidStr])
+        }
+      )
+
+  - name: Phase3_Kill_Loader
+    description: "Termina processi loader MoonSniper/main.exe/update.exe"
+    query: |
+      LET suspicious_procs = SELECT Pid, Name, Exe, Username,
+            str(str=Pid) AS PidStr
+        FROM pslist()
+        WHERE Name =~ "(?i)(MoonSniper|main|update)\\.exe$"
+
+      SELECT * FROM foreach(
+        row=suspicious_procs,
+        query={
+          SELECT
+            Pid, Name, Exe, Username,
+            timestamp(epoch=now()) AS Timestamp,
+            "Kill_Loader" AS Action,
+            Stdout, Stderr, ReturnCode
+          FROM execve(argv=["taskkill", "/F", "/PID", PidStr])
+        }
+      )
+
+  - name: Phase4_Remove_Files
+    description: "Rimozione file malevoli per hash SHA256"
+    query: |
+      LET hash_list = split(string=MaliciousHashes, sep=",")
+      LET scan_paths = split(string=ScanPaths, sep=",")
+
+      LET file_matches = SELECT * FROM foreach(
+        row=scan_paths,
+        query={
+          SELECT FullPath, Name, Size, Mtime,
+                 hash(path=FullPath, hashselect="SHA256") AS FileHash
+          FROM glob(globs=_value + "/**")
+          WHERE NOT IsDir
+            AND Name =~ "(?i)^(MoonSniper|main|update)\\.exe$"
+        }
+      )
+
+      LET confirmed = SELECT FullPath, Name, Size, Mtime,
+            FileHash.SHA256 AS SHA256
+        FROM file_matches
+        WHERE FileHash.SHA256 IN hash_list
+
+      SELECT * FROM foreach(
+        row=confirmed,
+        query={
+          SELECT
+            FullPath, Name, Size, SHA256,
+            timestamp(epoch=now()) AS Timestamp,
+            "Remove_File" AS Action,
+            Stdout, Stderr, ReturnCode
+          FROM execve(argv=["cmd", "/c", "del", "/f", "/q", FullPath])
+        }
+      )
+
+  - name: Phase5_Verify_Cleanup
+    description: "Verifica che non restino processi o connessioni C2"
+    query: |
+      LET c2_list = split(string=C2_IPs, sep=",")
+
+      LET remaining_procs = SELECT Pid, Name, Exe, Username
+        FROM pslist()
+        WHERE Name =~ "(?i)(MoonSniper|main|update)\\.exe$"
+
+      LET remaining_conns = SELECT Pid, RemoteAddr, RemotePort
+        FROM netstat()
+        WHERE RemoteAddr IN c2_list
+          AND Status = "ESTABLISHED"
+
+      LET proc_count = count(items=remaining_procs)
+      LET conn_count = count(items=remaining_conns)
+
+      SELECT
+        timestamp(epoch=now()) AS Timestamp,
+        "Verification" AS Action,
+        proc_count AS RemainingProcesses,
+        conn_count AS RemainingC2Connections,
+        if(condition=proc_count = 0 AND conn_count = 0,
+          then="ERADICAZIONE COMPLETATA",
+          else="INCOMPLETA — controllare manualmente"
+        ) AS FinalResult
+      FROM scope()
+
+  - name: Phase6_Persistence_Check
+    description: "Controlla registry e scheduled tasks per persistenza"
+    query: |
+      LET run_keys = (
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\*",
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*",
+        "HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\*",
+        "HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*"
+      )
+
+      LET suspicious_registry = SELECT
+          timestamp(epoch=now()) AS Timestamp,
+          "Registry" AS Type,
+          Key.FullPath AS Location,
+          Name,
+          Data.value AS Detail,
+          "Persistence_Found" AS Action
+        FROM foreach(
+          row=run_keys,
+          query={
+            SELECT Key, Name, Data
+            FROM read_reg_key(globs=_value)
+            WHERE Data.value =~ "(?i)(MoonSniper|main\\.exe|update\\.exe)"
+          }
+        )
+
+      LET suspicious_tasks = SELECT
+          timestamp(epoch=now()) AS Timestamp,
+          "ScheduledTask" AS Type,
+          FullPath AS Location,
+          Name,
+          parse_xml(file=FullPath).Task.Actions.Exec.Command AS Detail,
+          "Persistence_Found" AS Action
+        FROM glob(globs="C:/Windows/System32/Tasks/**")
+        WHERE NOT IsDir
+          AND parse_xml(file=FullPath).Task.Actions.Exec.Command
+              =~ "(?i)(MoonSniper|main\\.exe|update\\.exe)"
+
+      SELECT * FROM chain(
+        a=suspicious_registry,
+        b=suspicious_tasks
+      )
