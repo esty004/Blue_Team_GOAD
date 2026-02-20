@@ -1,0 +1,105 @@
+name: Windows.Detection.BloodHound
+description: |
+  Rileva attività di ricognizione Active Directory da BloodHound, SharpHound e strumenti correlati.
+author: Blue Team
+type: CLIENT
+
+sources:
+  - name: processes
+    description: Processi Sospetti
+    query: |
+      -- Ricerca processi con nomi tipici di SharpHound/BloodHound
+      SELECT Pid, Name, CommandLine, Username, CreateTime,
+             hash(path=Exe) AS Hash
+      FROM pslist()
+      WHERE Name =~ "(?i)(sharphound|bloodhound|azurehound)"
+         OR CommandLine =~ "(?i)(sharphound|bloodhound|CollectionMethod|ZipFileName|--Loop|--Stealth)"
+         OR CommandLine =~ "(?i)(ldap.*domain|domain.*ldap|DCOnly|ComputerFile)"
+
+  - name: ldap
+    description: Query LDAP Anomale
+    query: |
+      -- Individua query LDAP massive tipiche di enumerazione AD
+      LET threshold = 100
+      
+      SELECT System.TimeCreated.SystemTime AS EventTime,
+             EventData.SubjectUserName AS User,
+             EventData.ObjectDN AS TargetObject,
+             EventData.OperationType AS OpType,
+             count() AS QueryCount
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx")
+      WHERE System.EventID.Value = 4662
+        AND EventData.Properties =~ "(?i)(samAccountName|objectSid|memberOf|adminCount|servicePrincipalName)"
+      GROUP BY User, format(format="%v", args=grok(data=EventTime, format="%Y-%m-%d %H"))
+      HAVING QueryCount > threshold
+
+  - name: network
+    description: Traffico di Rete LDAP/SMB
+    query: |
+      -- Connessioni LDAP (389/636) e SMB (445) verso DC in breve tempo
+      LET window_seconds = 300
+      LET conn_threshold = 20
+      
+      SELECT Laddr, Raddr, Rport, Pid, Name,
+             count() AS Connections,
+             min(item=Timestamp) AS FirstSeen,
+             max(item=Timestamp) AS LastSeen
+      FROM netstat()
+      WHERE Rport IN (389, 636, 3268, 3269, 445, 135)
+        AND Status = "ESTABLISHED"
+      GROUP BY Pid, Raddr, Rport
+      HAVING Connections > conn_threshold
+
+  - name: files
+    description: File Caratteristici
+    query: |
+      -- Cerca file ZIP/JSON prodotti da SharpHound
+      SELECT FullPath, Size, Mtime, Atime,
+             hash(path=FullPath) AS SHA256
+      FROM glob(globs=[
+        "C:/Users/**/*_BloodHound.zip",
+        "C:/Users/**/*_computers.json",
+        "C:/Users/**/*_users.json",
+        "C:/Users/**/*_groups.json",
+        "C:/Users/**/*_domains.json",
+        "C:/Users/**/*_gpos.json",
+        "C:/Users/**/*_ous.json",
+        "C:/Temp/**/*.zip",
+        "C:/Windows/Temp/**/*.zip"
+      ])
+      WHERE Size > 1000
+
+  - name: registry
+    description: Persistenza in Registry
+    query: |
+      -- Verifica run key e scheduled task per eventuali persistence
+      SELECT Key.FullPath AS RegistryKey,
+             Key.Mtime AS LastModified,
+             Name AS ValueName,
+             Data AS ValueData
+      FROM read_reg_key(
+        globs=[
+          "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows/CurrentVersion/Run/**",
+          "HKEY_CURRENT_USER/SOFTWARE/Microsoft/Windows/CurrentVersion/Run/**"
+        ]
+      )
+      WHERE Data =~ "(?i)(sharphound|bloodhound|azurehound|CollectionMethod)"
+
+  - name: events
+    description: Event Log Enumerazione AD
+    query: |
+      -- Event 4624 + 4625 da host non-DC in breve finestra = spraying/enum
+      LET lookback_hours = 1
+      
+      SELECT System.TimeCreated.SystemTime AS Time,
+             System.EventID.Value AS EventID,
+             EventData.IpAddress AS SourceIP,
+             EventData.TargetUserName AS TargetUser,
+             EventData.LogonType AS LogonType,
+             count() AS Attempts
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx")
+      WHERE System.EventID.Value IN (4624, 4625, 4768, 4769, 4770, 4771)
+        AND System.TimeCreated.SystemTime > timestamp(epoch=now() - lookback_hours * 3600)
+      GROUP BY SourceIP, TargetUser
+      HAVING Attempts > 10
+      ORDER BY Attempts DESC
