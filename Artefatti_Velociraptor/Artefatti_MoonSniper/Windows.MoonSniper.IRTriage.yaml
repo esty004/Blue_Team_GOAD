@@ -1,0 +1,89 @@
+name: Windows.MoonSniper.IRTriage
+description: |
+  Triage completo per incident response post-rilevamento MoonSniper.
+  Raccoglie: memoria processo, artefatti disco, connessioni attive,
+  scheduled tasks, registry run keys, prefetch.
+author: Lab ITS
+type: CLIENT
+
+sources:
+  - name: MemoryDump_RuntimeBroker
+    description: Dump delle regioni di memoria eseguibili in RuntimeBroker
+    query: |
+      LET target = SELECT Pid FROM pslist()
+                   WHERE Name =~ "(?i)RuntimeBroker"
+                   LIMIT 1
+
+      SELECT * FROM foreach(
+        row=target,
+        query={
+          SELECT Pid, Address,
+                 format(format="%x", args=Address) AS AddressHex,
+                 Size, State, Type, Protection,
+                 format(format="%x", args=Protection) AS ProtHex,
+                 Filename
+          FROM vad(pid=Pid)
+          WHERE
+            -- Regioni RX senza file mappato = shellcode iniettato
+            Protection =~ "(?i)EXECUTE" AND
+            Type = "MEM_PRIVATE" AND
+            Filename = ""
+        }
+      )
+
+  - name: ScheduledTasks_Persistence
+    description: Scheduled tasks creati di recente (persistenza)
+    query: |
+      LET task_files = SELECT FullPath, Name, Mtime
+        FROM glob(globs="C:/Windows/System32/Tasks/**")
+        WHERE NOT IsDir
+          AND Mtime > now() - 86400000000000
+          AND NOT Name =~ "^\\."
+
+      LET parsed = SELECT FullPath, Name, Mtime,
+             parse_xml(file=FullPath) AS XML
+        FROM task_files
+
+      SELECT FullPath, Name, Mtime,
+             XML.Task.Actions.Exec.Command AS Command,
+             XML.Task.Actions.Exec.Arguments AS Arguments,
+             XML.Task.Principals.Principal.UserId AS UserId
+      FROM parsed
+      WHERE Command
+
+  - name: Registry_RunKeys
+    description: Chiavi di registro Run/RunOnce per persistenza
+    query: |
+      LET run_keys = (
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+        "HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+      )
+
+      SELECT Key, Name, Data.value AS Value, Mtime
+      FROM foreach(
+        row={ SELECT _value AS RegKey FROM run_keys },
+        query={
+          SELECT RegKey AS Key, Name, Data, Mtime
+          FROM read_reg_key(globs=RegKey + "\\*")
+        }
+      )
+
+  - name: Prefetch_Analysis
+    description: File prefetch per ricostruire esecuzioni
+    query: |
+      SELECT FullPath, Name, Mtime, Atime
+      FROM glob(globs="C:/Windows/Prefetch/*.pf")
+      WHERE Name =~ "(?i)(MOONSNIPER|MAIN|UPDATE)"
+
+  - name: Active_Connections_Full
+    description: Snapshot completo delle connessioni attive al momento del triage
+    query: |
+      SELECT Pid, Name, Exe,
+             Laddr.IP AS LocalIP, Laddr.Port AS LocalPort,
+             Raddr.IP AS RemoteIP, Raddr.Port AS RemotePort,
+             Status
+      FROM netstat()
+      WHERE Status = "ESTABLISHED"
+      ORDER BY Name
