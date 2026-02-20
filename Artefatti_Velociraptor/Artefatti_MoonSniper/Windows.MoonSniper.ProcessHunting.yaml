@@ -1,0 +1,85 @@
+name: Windows.MoonSniper.ProcessHunting
+description: |
+  Cerca processi attivi correlati a MoonSniper loader o Havoc Demon.
+  Rileva: RuntimeBroker con connessioni di rete, processi con parent anomalo,
+  processi con PID di debug attivo.
+author: Lab ITS
+type: CLIENT
+
+sources:
+  - name: SuspiciousProcesses
+    description: Processi attivi con indicatori MoonSniper/Havoc
+    query: |
+      -- Tutti i processi attivi con info parent
+      LET procs = SELECT Pid, Name, Exe, CommandLine, Username,
+                         CreateTime, Ppid,
+                         process_tracker_get(id=Ppid).Data.Name AS ParentName,
+                         process_tracker_get(id=Ppid).Data.Exe  AS ParentExe
+                  FROM pslist()
+
+      -- Filtra per indicatori sospetti
+      SELECT *
+      FROM procs
+      WHERE
+        -- MoonSniper per nome (incluso alias main.exe)
+        Name =~ "(?i)(MoonSniper|main\.exe)" OR
+
+        -- RuntimeBroker con parent non-svchost (injection target)
+        (Name =~ "(?i)RuntimeBroker" AND
+         NOT ParentName =~ "(?i)(svchost|services|wininit)") OR
+
+        -- update.exe da path non-standard
+        (Name =~ "(?i)update\.exe" AND
+         NOT Exe =~ "(?i)(Program Files|Windows\\System32)") OR
+
+        -- Qualsiasi processo con il PDB string o nome alias nel path
+        Exe =~ "(?i)(MoonSniper|main\.exe)"
+
+  - name: NetworkConnections_C2
+    description: Connessioni attive verso IP C2 noti
+    query: |
+      SELECT Pid, Name, Exe,
+             Laddr.IP AS LocalIP, Laddr.Port AS LocalPort,
+             Raddr.IP AS RemoteIP, Raddr.Port AS RemotePort,
+             Status, Type
+      FROM netstat()
+      WHERE
+        -- IP C2 noti
+        Raddr.IP =~ "192\\.168\\.56\\.60" OR
+        Raddr.IP =~ "10\\.0\\.2\\.15" OR
+
+        -- RuntimeBroker con connessioni di rete (ANOMALO)
+        (Name =~ "(?i)RuntimeBroker" AND Status = "ESTABLISHED")
+
+  - name: RuntimeBroker_Memory_Scan
+    description: Scansione memoria di RuntimeBroker per IOC Havoc
+    query: |
+      -- Trova tutti i processi RuntimeBroker
+      LET targets = SELECT Pid, Name, Exe
+                    FROM pslist()
+                    WHERE Name =~ "(?i)RuntimeBroker"
+
+      -- Scansione YARA in memoria per IOC Havoc
+      SELECT * FROM foreach(
+        row=targets,
+        query={
+          SELECT Pid, Name, RuleName, HitOffset,
+                 format(format="%x", args=HitOffset) AS HitOffsetHex
+          FROM proc_yara(
+            pid=Pid,
+            rules='''
+              rule HavocDemon_InMemory {
+                strings:
+                  $dll    = "demon.x64.dll" ascii
+                  $ep     = "/api/v1/upload" wide
+                  $tag    = "=^_^=" wide
+                  $ua     = "Chrome/96.0.4664.110" wide
+                  $c2_1   = "192.168.56.60" wide
+                  $c2_2   = "10.0.2.15" wide
+                condition:
+                  any of them
+              }
+            '''
+          )
+        }
+      )
